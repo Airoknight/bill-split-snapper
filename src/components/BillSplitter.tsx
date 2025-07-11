@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Camera, Users, Receipt, Calculator, Plus, X, Check } from "lucide-react";
+import { Camera, Users, Receipt, Calculator, Plus, X, Check, Loader } from "lucide-react";
+import { pipeline } from "@huggingface/transformers";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -38,19 +39,103 @@ export default function BillSplitter() {
   const [newFriendName, setNewFriendName] = useState("");
   const [newItemName, setNewItemName] = useState("");
   const [newItemPrice, setNewItemPrice] = useState("");
+  const [isProcessingOCR, setIsProcessingOCR] = useState(false);
   const { toast } = useToast();
 
-  const handleImageCapture = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const processOCR = async (imageUrl: string) => {
+    setIsProcessingOCR(true);
+    try {
+      // Load OCR pipeline
+      const ocr = await pipeline('image-to-text', 'Xenova/trocr-base-printed');
+      
+      // Process the image
+      const result = await ocr(imageUrl) as any;
+      const extractedText = Array.isArray(result) ? result[0]?.generated_text || '' : result.generated_text || '';
+      
+      // Parse extracted text for items and prices
+      const extractedItems = parseReceiptText(extractedText);
+      
+      if (extractedItems.length > 0) {
+        setItems(extractedItems);
+        toast({
+          title: "Items extracted successfully!",
+          description: `Found ${extractedItems.length} items from your bill.`,
+        });
+      } else {
+        toast({
+          title: "No items found",
+          description: "Unable to extract items automatically. You can add them manually.",
+        });
+      }
+    } catch (error) {
+      console.error('OCR processing failed:', error);
+      toast({
+        title: "OCR processing failed",
+        description: "Please add items manually.",
+        variant: "destructive"
+      });
+    } finally {
+      setIsProcessingOCR(false);
+    }
+  };
+
+  const parseReceiptText = (text: string): BillItem[] => {
+    const lines = text.split('\n').filter(line => line.trim());
+    const items: BillItem[] = [];
+    
+    // Pattern to match item lines with prices (various formats)
+    const itemPatterns = [
+      /(.+?)\s+\$?(\d+\.?\d*)/,  // Item name followed by price
+      /(.+?)\s+(\d+\.?\d*)\s*\$?/,  // Item name followed by price with optional $
+      /(.+?)\$(\d+\.?\d*)/,  // Item name with $ before price
+    ];
+    
+    for (const line of lines) {
+      for (const pattern of itemPatterns) {
+        const match = line.match(pattern);
+        if (match) {
+          const name = match[1].trim();
+          const price = parseFloat(match[2]);
+          
+          // Filter out non-item lines (totals, taxes, etc.)
+          if (name && price > 0 && 
+              !name.toLowerCase().includes('total') &&
+              !name.toLowerCase().includes('tax') &&
+              !name.toLowerCase().includes('subtotal') &&
+              !name.toLowerCase().includes('tip') &&
+              name.length > 2) {
+            
+            items.push({
+              id: `ocr-${Date.now()}-${items.length}`,
+              name: name,
+              price: price,
+              sharedWith: []
+            });
+            break; // Found a match, move to next line
+          }
+        }
+      }
+    }
+    
+    return items;
+  };
+
+  const handleImageCapture = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
       const reader = new FileReader();
-      reader.onload = (e) => {
-        setBillImage(e.target?.result as string);
+      reader.onload = async (e) => {
+        const imageUrl = e.target?.result as string;
+        setBillImage(imageUrl);
         setStep('items');
+        
         toast({
           title: "Photo captured!",
-          description: "Now add the items from your bill.",
+          description: "Processing image to extract items...",
         });
+        
+        // Process OCR automatically
+        await processOCR(imageUrl);
       };
       reader.readAsDataURL(file);
     }
@@ -201,6 +286,15 @@ export default function BillSplitter() {
           </div>
         )}
         
+        {isProcessingOCR && (
+          <div className="flex items-center justify-center gap-2 p-4 bg-muted/50 rounded-lg">
+            <Loader className="w-4 h-4 animate-spin" />
+            <span className="text-sm text-muted-foreground">
+              Extracting items from your bill...
+            </span>
+          </div>
+        )}
+        
         <div className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
@@ -224,10 +318,27 @@ export default function BillSplitter() {
               />
             </div>
           </div>
-          <Button onClick={addItem} className="w-full">
-            <Plus className="w-4 h-4" />
-            Add Item
-          </Button>
+          <div className="flex gap-2">
+            <Button onClick={addItem} className="flex-1">
+              <Plus className="w-4 h-4" />
+              Add Item
+            </Button>
+            {billImage && (
+              <Button 
+                variant="outline" 
+                onClick={() => processOCR(billImage)}
+                disabled={isProcessingOCR}
+                className="flex-1"
+              >
+                {isProcessingOCR ? (
+                  <Loader className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Receipt className="w-4 h-4" />
+                )}
+                Re-scan Bill
+              </Button>
+            )}
+          </div>
         </div>
 
         {items.length > 0 && (
